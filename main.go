@@ -66,7 +66,12 @@ func run(args []string) error {
 		waitFor:    *waitFor,
 	}
 
-	result, err := extract(urlStr, cfg)
+	fetcher, err := NewFetcher(cfg)
+	if err != nil {
+		return err
+	}
+	defer fetcher.Close()
+	result, err := extract(urlStr, cfg, fetcher)
 	if err != nil {
 		return err
 	}

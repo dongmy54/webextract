@@ -8,8 +8,8 @@ import (
 )
 
 // extract 是核心流程：渲染抓取 → 定位正文 → 清理噪声 → 规范化代码块 → 转 Markdown。
-func extract(urlStr string, cfg options) (string, error) {
-	htmlStr, finalURL, err := fetchRenderedHTML(urlStr, cfg)
+func extract(urlStr string, cfg options, f *Fetcher) (string, error) {
+	htmlStr, finalURL, err := f.Fetch(urlStr, cfg)
 	if err != nil {
 		return "", fmt.Errorf("抓取页面失败: %w", err)
 	}
