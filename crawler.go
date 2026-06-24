@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -220,6 +221,9 @@ func (c *Crawler) Run(ctx context.Context) (*crawlReport, error) {
 	report.Stats = stats
 	report.FinishedAt = time.Now()
 
+	// 后处理：把站内链接改写为本地相对路径，使抓取下来的文件结构自身支持跳转。
+	c.rewriteLocalLinks(report, seedURL)
+
 	if aborted {
 		return report, ctx.Err()
 	}
@@ -319,4 +323,51 @@ func clipReason(s string) string {
 		return s[:maxReasonLen] + "..."
 	}
 	return s
+}
+
+// rewriteLocalLinks 是链接改写后处理：构建「规范化 URL → 本地文件路径」映射，
+// 然后对每个已成功落盘的 .md 文件，把其中的站内链接改写为相对路径，使本地文件
+// 之间可点击跳转。映射同时登记 URL 与 finalURL，兼容页面重定向与不同链接写法。
+func (c *Crawler) rewriteLocalLinks(report *crawlReport, seed *url.URL) {
+	urlToFile := make(map[string]string, len(report.Pages)*2)
+	for _, p := range report.Pages {
+		if p.Status != statusOK || p.File == "" {
+			continue
+		}
+		urlToFile[p.URL] = p.File
+		if p.FinalURL != "" {
+			if fu, err := NormalizeURL(p.FinalURL); err == nil && fu != p.URL {
+				urlToFile[fu] = p.File
+			}
+		}
+	}
+	if len(urlToFile) == 0 {
+		return
+	}
+
+	for i := range report.Pages {
+		p := &report.Pages[i]
+		if p.Status != statusOK || p.File == "" {
+			continue
+		}
+		full := filepath.Join(c.opts.outDir, p.File)
+		data, err := os.ReadFile(full)
+		if err != nil {
+			c.logger.Printf("链接改写：读取失败 %s: %v", p.File, err)
+			continue
+		}
+		source := p.FinalURL
+		if source == "" {
+			source = p.URL
+		}
+		rewritten := RewriteLocalLinks(string(data), source, p.File, urlToFile, seed, c.opts.allowSubdomains)
+		if rewritten == string(data) {
+			continue
+		}
+		if err := os.WriteFile(full, []byte(rewritten), 0o644); err != nil {
+			c.logger.Printf("链接改写：写回失败 %s: %v", p.File, err)
+			continue
+		}
+		p.Bytes = len(rewritten)
+	}
 }
