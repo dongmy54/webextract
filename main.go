@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -27,6 +29,11 @@ func main() {
 }
 
 func run(args []string) error {
+	// 子命令分发：第一个参数为 "crawl" 时进入网站爬取模式，否则保持单页提取模式。
+	if len(args) > 0 && args[0] == "crawl" {
+		return runCrawl(args[1:])
+	}
+
 	fs := flag.NewFlagSet("webextract", flag.ContinueOnError)
 	var (
 		raw      = fs.Bool("raw", false, "输出渲染后的原始 HTML（调试用），而非 Markdown")
@@ -92,4 +99,145 @@ func run(args []string) error {
 		io.WriteString(w, "\n")
 	}
 	return nil
+}
+
+// runCrawl 解析 crawl 子命令参数并驱动一次 BFS 站点爬取。
+func runCrawl(args []string) error {
+	fs := flag.NewFlagSet("webextract crawl", flag.ContinueOnError)
+	var (
+		depth        = fs.Int("depth", 2, "最大爬取深度（入口页=0）")
+		maxPages     = fs.Int("max-pages", 100, "最大抓取页面数（含入口）")
+		workers      = fs.Int("workers", 5, "并发抓取数量")
+		rate         = fs.Float64("rate-limit", 2, "每秒最大请求数（限流，0=不限）")
+		outDir       = fs.String("output", "output", "Markdown 输出目录")
+		allowSub     = fs.Bool("allow-subdomains", false, "允许抓取同注册域的子域（默认仅同 host）")
+		crawlTimeout = fs.Int("crawl-timeout", 1800, "爬取总超时秒数（0=不限）")
+		// 继承单页提取参数，保证每个页面与单页模式提取行为一致。
+		selector = fs.String("selector", "", "CSS 选择器，指定正文区域（默认自动检测 main/article）")
+		timeout  = fs.Int("timeout", 60, "单页渲染等待最大秒数")
+		ua       = fs.String("user-agent", "", "自定义 User-Agent（默认模拟桌面 Chrome）")
+		srcURL   = fs.Bool("include-source-url", false, "在每个 Markdown 开头以注释标注来源 URL")
+		waitFor  = fs.String("wait-for", "", "等待该 CSS 选择器出现后再提取（可选）")
+	)
+	fs.Usage = func() {
+		w := fs.Output()
+		fmt.Fprintf(w, "webextract crawl — 从入口 URL 出发，BFS 爬取整个站点并输出 Markdown\n\n")
+		fmt.Fprintf(w, "用法:\n  webextract crawl <URL> [选项]\n\n选项:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(w, "\n示例:\n")
+		fmt.Fprintf(w, "  webextract crawl https://docs.example.com\n")
+		fmt.Fprintf(w, "  webextract crawl https://docs.example.com --depth 3 --max-pages 500 --workers 10 --rate-limit 2\n")
+	}
+	// 标准 flag 包遇到首个位置参数即停止解析，因此支持「URL 在前、选项在后」
+	// （见技术方案示例）需先把位置参数重排到选项之后。
+	if err := fs.Parse(reorderForFlagParse(args, boolFlagNames(fs))); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return fmt.Errorf("缺少 URL 参数")
+	}
+	urlStr := fs.Arg(0)
+
+	switch {
+	case *depth < 0:
+		return fmt.Errorf("--depth 不能为负")
+	case *maxPages < 1:
+		return fmt.Errorf("--max-pages 至少为 1")
+	case *workers < 1:
+		return fmt.Errorf("--workers 至少为 1")
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		return fmt.Errorf("创建输出目录失败: %w", err)
+	}
+
+	extractCfg := options{
+		selector:   *selector,
+		timeout:    time.Duration(*timeout) * time.Second,
+		userAgent:  *ua,
+		includeURL: *srcURL,
+		waitFor:    *waitFor,
+	}
+	opts := crawlOptions{
+		seed:            urlStr,
+		depth:           *depth,
+		maxPages:        *maxPages,
+		workers:         *workers,
+		ratePerSec:      *rate,
+		outDir:          *outDir,
+		allowSubdomains: *allowSub,
+		extract:         extractCfg,
+		crawlTimeout:    time.Duration(*crawlTimeout) * time.Second,
+	}
+
+	fetcher, err := NewFetcher(extractCfg)
+	if err != nil {
+		return err
+	}
+	defer fetcher.Close()
+
+	ctx := context.Background()
+	if opts.crawlTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.crawlTimeout)
+		defer cancel()
+	}
+
+	crawler := NewCrawler(fetcher, opts)
+	report, runErr := crawler.Run(ctx)
+
+	// 即使 Run 中途出错，也尽量写出已抓取页面的索引。
+	if report != nil {
+		if werr := WriteIndexJSON(*outDir, report); werr != nil {
+			fmt.Fprintf(os.Stderr, "webextract: 写 index.json 失败: %v\n", werr)
+		}
+		if werr := WriteIndexMarkdown(*outDir, report); werr != nil {
+			fmt.Fprintf(os.Stderr, "webextract: 写 index.md 失败: %v\n", werr)
+		}
+		fmt.Fprintf(os.Stderr, "\n爬取完成：%d 页（成功 %d，失败 %d，跳过 %d），耗时 %s\n",
+			report.Stats.Total, report.Stats.Success, report.Stats.Failed, report.Stats.Skipped, report.Duration())
+		fmt.Fprintf(os.Stderr, "输出目录：%s\n", *outDir)
+	}
+	return runErr
+}
+
+// boolFlagNames 返回 fs 中所有布尔 flag 的名称集合。布尔 flag 不带单独的值参数，
+// 重排参数时不应把其后一个 token 当作它的值。
+func boolFlagNames(fs *flag.FlagSet) map[string]bool {
+	names := map[string]bool{}
+	fs.VisitAll(func(f *flag.Flag) {
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			names[f.Name] = true
+		}
+	})
+	return names
+}
+
+// reorderForFlagParse 把位置参数（如 URL）移到所有选项之后，使标准 flag 包能正确
+// 解析「URL 在前、选项在后」的写法。boolFlags 标记无需单独值参数的布尔选项。
+// 已用 --name=value 形式给出的值不会被拆分。
+func reorderForFlagParse(args []string, boolFlags map[string]bool) []string {
+	var positional []string
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--": // 显式终止选项解析，其后均为位置参数
+			positional = append(positional, args[i+1:]...)
+			i = len(args)
+		case len(a) > 1 && a[0] == '-': // 选项
+			out = append(out, a)
+			if strings.Contains(a, "=") {
+				continue // 值已内含
+			}
+			name := strings.TrimLeft(a, "-")
+			if !boolFlags[name] && i+1 < len(args) {
+				out = append(out, args[i+1]) // 带值选项的值
+				i++
+			}
+		default: // 位置参数
+			positional = append(positional, a)
+		}
+	}
+	return append(out, positional...)
 }

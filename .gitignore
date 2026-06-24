@@ -17,3 +17,6 @@ coverage.txt
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 爬取输出目录（crawl 默认输出）
+/output/

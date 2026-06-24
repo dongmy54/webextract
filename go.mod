@@ -6,6 +6,8 @@ require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/PuerkitoBio/goquery v1.12.0
 	github.com/chromedp/chromedp v0.15.1
+	golang.org/x/net v0.52.0
+	golang.org/x/time v0.15.0
 )
 
 require (
@@ -16,7 +18,6 @@ require (
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

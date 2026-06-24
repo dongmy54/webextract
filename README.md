@@ -66,6 +66,55 @@ webextract --selector 'div.article-body' https://example.com
 webextract -raw https://example.com > debug.html
 ```
 
+## 网站爬取（crawl）
+
+从入口 URL 出发，广度优先（BFS）递归抓取整个站点，复用同一套正文提取能力，按 URL 路径输出 Markdown 文件，并生成索引。
+
+```bash
+webextract crawl https://docs.example.com \
+  --depth 3 \
+  --max-pages 500 \
+  --workers 10 \
+  --rate-limit 2
+```
+
+参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--depth` | 2 | 最大爬取深度（入口页=0，抓取深度 0..depth） |
+| `--max-pages` | 100 | 最大抓取页面数（含入口） |
+| `--workers` | 5 | 并发抓取数量（= 最大并发 tab 数） |
+| `--rate-limit` | 2 | 每秒最大请求数（限流，0=不限；支持小数如 0.5） |
+| `--output` | output | Markdown 输出目录 |
+| `--allow-subdomains` | false | 允许抓取同注册域的子域（默认仅同 host） |
+| `--crawl-timeout` | 1800 | 爬取总超时秒数（0=不限） |
+
+单页提取的相关参数（`--selector` / `--timeout` / `--user-agent` / `--include-source-url` / `--wait-for`）同样适用于 crawl，作用于抓取到的每个页面。
+
+输出结构示例：
+
+```text
+output/
+├── index.json        # 机器可读索引（每页 url/标题/深度/文件/状态）
+├── index.md          # 人类可读索引（按深度分组的标题→路径列表）
+├── index.md ...      # 与原 URL 路径对应的 Markdown 文件
+├── install.md
+├── config/
+│   └── mysql.md
+└── api/
+    └── user.md
+```
+
+特性与限制：
+
+- **BFS + 去重**：所有链接进入队列前先规范化（去 `#fragment`、去 utm 等 tracking 参数、query 排序、host 小写、去默认端口、路径规整），避免循环引用与重复抓取。
+- **站内限制**：默认仅抓取与入口同 host 的页面；`--allow-subdomains` 放宽到同注册域（基于 publicsuffix 精确判断）。
+- **Worker Pool + 限流**：可配置并发与全局请求频率，降低对目标站点的压力。
+- **容错**：单页失败（404/403/500/超时/解析失败）记录后继续，不影响整体；连续失败会熔断。入口页本身抓取失败则整体失败。
+- **默认不读取 robots.txt**：本工具为用户主动指定目标的 CLI，请合理设置 `--rate-limit` 与 User-Agent。
+- **链接来源**：从无头 Chrome 渲染后的 `<a href>` 提取（SPA 客户端路由链接可抓取）；`onclick`/`<button>` 触发的跳转无法抓取。
+
 ## 工作原理
 
 ```
@@ -94,17 +143,23 @@ Markdown
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 命令行入口、参数解析 |
+| `main.go` | 命令行入口、参数解析、`crawl` 子命令分发 |
 | `fetch.go` | chromedp 无头渲染抓取、Chrome 路径查找、DOM 稳定等待 |
-| `pipeline.go` | 核心流程编排：抓取 → 定位 → 规范化 → 转换 → 清理 |
+| `pipeline.go` | 核心流程编排：抓取 → 定位 → 规范化 → 转换 → 清理（`extractFromHTML` 供 crawl 复用） |
 | `extract.go` | 正文区域定位、噪音移除、`data-as` 语义还原、代码块规范化 |
 | `convert.go` | HTML → Markdown 转换与输出清理 |
+| `urlutil.go` | URL 规范化（去重权威）、tracking 参数剥离、站内/子域范围判定 |
+| `links.go` | 从渲染后原始 DOM 提取站内链接（处理 `<base href>`、过滤资源/特殊协议） |
+| `crawler.go` | BFS 调度 + Worker Pool + 限流 + 去重 + 深度/页数控制 + 熔断 |
+| `output.go` | URL→文件路径映射、Markdown 落盘、索引（`index.json` / `index.md`）生成 |
 
 ## 依赖
 
 - [`github.com/chromedp/chromedp`](https://github.com/chromedp/chromedp) — Chrome DevTools Protocol 客户端，驱动无头浏览器渲染
 - [`github.com/PuerkitoBio/goquery`](https://github.com/PuerkitoBio/goquery) — HTML 解析与 DOM 操作
 - [`github.com/JohannesKaufmann/html-to-markdown`](https://github.com/JohannesKaufmann/html-to-markdown) — HTML 转 Markdown（启用 GitHub Flavored 插件）
+- [`golang.org/x/time/rate`](https://pkg.go.dev/golang.org/x/time/rate) — 令牌桶限流（crawl 子命令）
+- [`golang.org/x/net/publicsuffix`](https://pkg.go.dev/golang.org/x/net/publicsuffix) — 注册域判定（`--allow-subdomains`）
 
 ## 关于测试参考文件
 
