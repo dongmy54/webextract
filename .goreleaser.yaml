@@ -40,6 +40,11 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
+release:
+  # 含 -rc / -pre / -beta 等后缀的 tag 自动标记为预发布，
+  # 避免候选/测试版本顶替正式版的 latest 地位。
+  prerelease: auto
+
 changelog:
   use: github
   sort: asc
