@@ -1,4 +1,4 @@
-module webextract
+module github.com/dongmy54/webextract
 
 go 1.26.4
 

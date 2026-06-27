@@ -17,9 +17,37 @@ webextract https://code.claude.com/docs/en/overview
   - 标题锚点、面包屑、页脚反馈区等噪音的清理。
 - **链接原样保留**：相对链接（`/docs/quickstart`）与绝对链接均按页面原样输出，不擅自改写。
 
-## 安装与构建
+## 安装
 
-需要本机已安装 [Go](https://go.dev) 1.21+，以及 Chrome / Chromium / Edge 浏览器之一（用于无头渲染）。
+提供三种方式，任选其一。**运行时均需本机已安装 Chrome / Chromium / Edge**（用于无头渲染，与是否安装 Go 无关）。
+
+### 一键脚本（macOS / Linux，推荐）
+
+无需安装 Go，一行命令即可：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dongmy54/webextract/main/install.sh | bash
+```
+
+脚本会自动识别系统与 CPU 架构，从 [Releases](https://github.com/dongmy54/webextract/releases) 下载对应预编译二进制，安装到 `~/.local/bin`（可用 `INSTALL_DIR` 环境变量自定义，如 `INSTALL_DIR=/usr/local/bin`）。
+
+### go install
+
+已安装 Go（1.26+）的用户：
+
+```bash
+go install github.com/dongmy54/webextract@latest
+```
+
+### Windows
+
+前往 [Releases](https://github.com/dongmy54/webextract/releases/latest) 下载 `webextract_<version>_windows_amd64.zip`（或 `_arm64`），解压取出 `webextract.exe` 放入 PATH 即可。
+
+预编译二进制覆盖：`linux/amd64`、`linux/arm64`、`darwin/amd64`（macOS Intel）、`darwin/arm64`（macOS Apple Silicon）、`windows/amd64`、`windows/arm64`。
+
+## 源码构建
+
+需要本机已安装 [Go](https://go.dev)（版本需满足 `go.mod`，当前为 1.26+）。运行时另需 Chrome / Chromium / Edge。
 
 ```bash
 go build -o webextract .
@@ -161,6 +189,7 @@ Markdown
 - [`github.com/JohannesKaufmann/html-to-markdown`](https://github.com/JohannesKaufmann/html-to-markdown) — HTML 转 Markdown（启用 GitHub Flavored 插件）
 - [`golang.org/x/time/rate`](https://pkg.go.dev/golang.org/x/time/rate) — 令牌桶限流（crawl 子命令）
 - [`golang.org/x/net/publicsuffix`](https://pkg.go.dev/golang.org/x/net/publicsuffix) — 注册域判定（`--allow-subdomains`）
+- **运行时**：Chrome / Chromium / Edge（无头渲染，随系统安装，非 Go 模块）
 
 ## 关于测试参考文件
 
