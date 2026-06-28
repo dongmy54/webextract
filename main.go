@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 // options 聚合命令行参数。
@@ -29,9 +33,12 @@ func main() {
 }
 
 func run(args []string) error {
-	// 子命令分发：第一个参数为 "crawl" 时进入网站爬取模式，否则保持单页提取模式。
+	// 子命令分发：crawl→站点爬取，nav→导航菜单提取，否则保持单页提取模式。
 	if len(args) > 0 && args[0] == "crawl" {
 		return runCrawl(args[1:])
+	}
+	if len(args) > 0 && args[0] == "nav" {
+		return runNav(args[1:])
 	}
 
 	fs := flag.NewFlagSet("webextract", flag.ContinueOnError)
@@ -199,6 +206,108 @@ func runCrawl(args []string) error {
 		fmt.Fprintf(os.Stderr, "输出目录：%s\n", *outDir)
 	}
 	return runErr
+}
+
+// runNav 解析 nav 子命令参数，渲染首页并提取主导航菜单树，按 tree/json 输出。
+func runNav(args []string) error {
+	fs := flag.NewFlagSet("webextract nav", flag.ContinueOnError)
+	var (
+		format     = fs.String("format", "tree", "输出格式：tree（人类可读树形）/ json（供第二阶段消费）")
+		maxDepth   = fs.Int("max-depth", 0, "导航菜单最大层级（1=仅一级，2=含二级，0=不限）")
+		selector   = fs.String("selector", "", "显式指定导航容器 CSS 选择器，覆盖自动检测")
+		all        = fs.Bool("all", false, "保留站外链接（默认仅保留与入口同注册域的链接）")
+		includeURL = fs.Bool("include-url", false, "tree 输出中在每个菜单项后附 URL")
+		out        = fs.String("o", "", "写入指定文件（默认输出到标准输出）")
+		timeout    = fs.Int("timeout", 60, "渲染等待的最大秒数")
+		ua         = fs.String("user-agent", "", "自定义 User-Agent（默认模拟桌面 Chrome）")
+		waitFor    = fs.String("wait-for", "", "等待该 CSS 选择器出现后再提取（SPA 站点用）")
+	)
+	fs.Usage = func() {
+		w := fs.Output()
+		fmt.Fprintf(w, "webextract nav — 从首页提取主导航菜单树（菜单名 + URL）\n\n")
+		fmt.Fprintf(w, "用法:\n  webextract nav <URL> [选项]\n\n选项:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(w, "\n示例:\n")
+		fmt.Fprintf(w, "  webextract nav https://example.com\n")
+		fmt.Fprintf(w, "  webextract nav https://example.com --format json -o nav.json\n")
+	}
+	if err := fs.Parse(reorderForFlagParse(args, boolFlagNames(fs))); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return fmt.Errorf("缺少 URL 参数")
+	}
+	urlStr := fs.Arg(0)
+	if *format != "tree" && *format != "json" {
+		return fmt.Errorf("--format 只支持 tree 或 json，得到 %q", *format)
+	}
+	if *maxDepth < 0 {
+		return fmt.Errorf("--max-depth 不能为负")
+	}
+
+	cfg := options{
+		timeout:   time.Duration(*timeout) * time.Second,
+		userAgent: *ua,
+		waitFor:   *waitFor,
+	}
+	fetcher, err := NewFetcher(cfg)
+	if err != nil {
+		return err
+	}
+	defer fetcher.Close()
+
+	htmlStr, finalURL, err := fetcher.Fetch(urlStr, cfg)
+	if err != nil {
+		return fmt.Errorf("抓取首页失败: %w", err)
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlStr))
+	if err != nil {
+		return fmt.Errorf("解析 HTML 失败: %w", err)
+	}
+	seedNorm, err := NormalizeURL(finalURL)
+	if err != nil {
+		return fmt.Errorf("入口 URL 无效: %w", err)
+	}
+	seedURL, err := url.Parse(seedNorm)
+	if err != nil {
+		return fmt.Errorf("入口 URL 无效: %w", err)
+	}
+
+	items := ExtractNav(doc, finalURL, seedURL, navOptions{
+		maxDepth: *maxDepth,
+		selector: *selector,
+		all:      *all,
+	})
+	tree := NavTree{Seed: seedNorm, Items: items}
+
+	var output string
+	if *format == "json" {
+		b, err := json.MarshalIndent(tree, "", "  ")
+		if err != nil {
+			return fmt.Errorf("序列化 JSON 失败: %w", err)
+		}
+		output = string(b)
+	} else {
+		output = RenderNavTree(tree, *includeURL)
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	if _, err := io.WriteString(w, output); err != nil {
+		return err
+	}
+	if len(output) > 0 && output[len(output)-1] != '\n' {
+		io.WriteString(w, "\n")
+	}
+	return nil
 }
 
 // boolFlagNames 返回 fs 中所有布尔 flag 的名称集合。布尔 flag 不带单独的值参数，

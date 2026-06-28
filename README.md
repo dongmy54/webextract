@@ -144,6 +144,51 @@ output/
 - **默认不读取 robots.txt**：本工具为用户主动指定目标的 CLI，请合理设置 `--rate-limit` 与 User-Agent。
 - **链接来源**：从无头 Chrome 渲染后的 `<a href>` 提取（SPA 客户端路由链接可抓取）；`onclick`/`<button>` 触发的跳转无法抓取。
 
+## 导航菜单提取（nav）
+
+渲染首页并提取**主导航菜单树**（菜单名 + 链接 URL），输出人类可读树形或机器可读 JSON。它是「导航驱动爬取」的第一阶段：先看清站点导航结构，其 JSON 输出可作为后续按分类抓取的输入。
+
+```bash
+# 树形输出
+webextract nav https://go.dev --max-depth 2
+
+# JSON 输出（写入文件，供后续消费）
+webextract nav https://go.dev --format json -o nav.json
+```
+
+树形输出示例：
+
+```text
+网站导航 — https://go.dev/
+
+├─ Why Go
+│  ├─ Case Studies
+│  ├─ Use Cases
+│  └─ Security
+├─ Learn
+├─ Docs
+│  ├─ Go Spec
+│  └─ Effective Go
+└─ Community
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--format` | `tree` | 输出格式：`tree`（树形）/ `json`（供第二阶段消费） |
+| `--max-depth` | `0` | 菜单最大层级（1=仅一级，2=含二级，0=不限） |
+| `--selector` | `""` | 显式指定导航容器 CSS 选择器，覆盖自动检测 |
+| `--all` | `false` | 保留站外链接（默认仅保留与入口同注册域的链接） |
+| `--include-url` | `false` | tree 输出中在每个菜单项后附 URL |
+| `--o` | `""` | 写入文件（默认标准输出） |
+
+单页提取的 `--timeout` / `--user-agent` / `--wait-for` 同样适用。
+
+提取原理：
+
+- **容器定位（打分择优）**：收集页面所有候选导航容器（`nav`/`[role=navigation]`/`aside`/常见 `.nav`/`.sidebar`/`.menu` 类与 id），按「链接数 + 嵌套层级」打分取最高者——文档站「链接最多、结构最深」的左侧侧边栏因此能胜出，而不会被顶栏少量链接的导航抢先。排除 footer 内导航与「包住其它候选的外层大容器」；兜底为 header 内含 `<a>` 的块。可用 `--selector` 手动指定。
+- **多分区 + ul/li 递归**：容器内若有多个并列的顶层 `<ul>` 分区（文档侧边栏常按 `<h3>` 标题分组），逐一处理并以标题作为分组父节点；对每个 `<li>` 克隆删子列表后取首个 `<a>`（无 `<a>` 时取 `<details><summary>` 等纯文本）作为本层菜单名，再递归子列表；非 ul/ol 结构回退为容器内 `<a>` 的扁平列表。
+- **规范化与过滤**：复用 `NormalizeURL` 去重，默认仅保留同注册域链接（`--all` 关闭），剔除资源后缀与 `javascript:`/`mailto:` 等特殊协议，并清理图标字体连字文本。
+
 ## 工作原理
 
 ```
@@ -172,13 +217,14 @@ Markdown
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 命令行入口、参数解析、`crawl` 子命令分发 |
+| `main.go` | 命令行入口、参数解析、`crawl` / `nav` 子命令分发 |
 | `fetch.go` | chromedp 无头渲染抓取、Chrome 路径查找、DOM 稳定等待 |
 | `pipeline.go` | 核心流程编排：抓取 → 定位 → 规范化 → 转换 → 清理（`extractFromHTML` 供 crawl 复用） |
 | `extract.go` | 正文区域定位、噪音移除、`data-as` 语义还原、代码块规范化 |
 | `convert.go` | HTML → Markdown 转换与输出清理 |
 | `urlutil.go` | URL 规范化（去重权威）、tracking 参数剥离、站内/子域范围判定 |
 | `links.go` | 从渲染后原始 DOM 提取站内链接（处理 `<base href>`、过滤资源/特殊协议） |
+| `nav.go` | 从首页 DOM 提取主导航菜单树（容器定位、ul/li 递归、规范化/去重/过滤、树形渲染） |
 | `crawler.go` | BFS 调度 + Worker Pool + 限流 + 去重 + 深度/页数控制 + 熔断 |
 | `output.go` | URL→文件路径映射、Markdown 落盘、索引（`index.json` / `index.md`）生成 |
 
