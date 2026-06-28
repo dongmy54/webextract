@@ -33,12 +33,16 @@ func main() {
 }
 
 func run(args []string) error {
-	// 子命令分发：crawl→站点爬取，nav→导航菜单提取，否则保持单页提取模式。
+	// 子命令分发：crawl→BFS 站点爬取，nav→导航菜单提取，sitemap-crawl→导航驱动抓取，
+	// 否则保持单页提取模式。
 	if len(args) > 0 && args[0] == "crawl" {
 		return runCrawl(args[1:])
 	}
 	if len(args) > 0 && args[0] == "nav" {
 		return runNav(args[1:])
+	}
+	if len(args) > 0 && args[0] == "sitemap-crawl" {
+		return runSitemapCrawl(args[1:])
 	}
 
 	fs := flag.NewFlagSet("webextract", flag.ContinueOnError)
@@ -308,6 +312,112 @@ func runNav(args []string) error {
 		io.WriteString(w, "\n")
 	}
 	return nil
+}
+
+// runSitemapCrawl 解析 sitemap-crawl 子命令参数并驱动一次导航驱动抓取：从导航菜单
+// （现场提取或读取 nav.json）展开抓取目标，逐页抓取正文并按菜单树结构落盘。
+func runSitemapCrawl(args []string) error {
+	fs := flag.NewFlagSet("webextract sitemap-crawl", flag.ContinueOnError)
+	var (
+		navFile   = fs.String("nav", "", "读取第一阶段 nav.json 作为抓取目标（与 <URL> 二选一）")
+		navDepth  = fs.Int("nav-depth", 0, "仅使用导航的前 N 层菜单作为抓取目标（0=全部）")
+		maxDepth  = fs.Int("max-depth", 0, "导航菜单最大层级（1=仅一级，2=含二级，0=不限），仅现场提取时生效")
+		selector  = fs.String("nav-selector", "", "显式指定导航容器 CSS 选择器，覆盖自动检测（仅现场提取时生效）")
+		all       = fs.Bool("all", false, "保留站外导航链接（默认仅与入口同注册域，仅现场提取时生效）")
+		workers   = fs.Int("workers", 5, "并发抓取数量")
+		rate      = fs.Float64("rate-limit", 2, "每秒最大请求数（限流，0=不限）")
+		outDir    = fs.String("output", "output", "Markdown 输出目录")
+		ctTimeout = fs.Int("crawl-timeout", 1800, "抓取总超时秒数（0=不限）")
+		// 继承单页提取参数，保证每个页面与单页模式提取行为一致。
+		contentSel = fs.String("selector", "", "CSS 选择器，指定正文区域（默认自动检测 main/article）")
+		timeout    = fs.Int("timeout", 60, "单页渲染等待最大秒数")
+		ua         = fs.String("user-agent", "", "自定义 User-Agent（默认模拟桌面 Chrome）")
+		srcURL     = fs.Bool("include-source-url", false, "在每个 Markdown 开头以注释标注来源 URL")
+		waitFor    = fs.String("wait-for", "", "等待该 CSS 选择器出现后再提取（可选）")
+	)
+	fs.Usage = func() {
+		w := fs.Output()
+		fmt.Fprintf(w, "webextract sitemap-crawl — 基于导航菜单逐页抓取内容，按菜单树结构组织输出\n\n")
+		fmt.Fprintf(w, "用法:\n  webextract sitemap-crawl <URL> [选项]\n  webextract sitemap-crawl --nav nav.json [选项]\n\n选项:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(w, "\n示例:\n")
+		fmt.Fprintf(w, "  webextract sitemap-crawl https://example.com\n")
+		fmt.Fprintf(w, "  webextract sitemap-crawl --nav nav.json --output site\n")
+	}
+	if err := fs.Parse(reorderForFlagParse(args, boolFlagNames(fs))); err != nil {
+		return err
+	}
+
+	var urlStr string
+	if fs.NArg() >= 1 {
+		urlStr = fs.Arg(0)
+	}
+	switch {
+	case urlStr == "" && *navFile == "":
+		fs.Usage()
+		return fmt.Errorf("需提供 <URL> 或 --nav 之一")
+	case urlStr != "" && *navFile != "":
+		return fmt.Errorf("<URL> 与 --nav 二选一，不能同时提供")
+	case *navDepth < 0:
+		return fmt.Errorf("--nav-depth 不能为负")
+	case *maxDepth < 0:
+		return fmt.Errorf("--max-depth 不能为负")
+	case *workers < 1:
+		return fmt.Errorf("--workers 至少为 1")
+	}
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		return fmt.Errorf("创建输出目录失败: %w", err)
+	}
+
+	extractCfg := options{
+		selector:   *contentSel,
+		timeout:    time.Duration(*timeout) * time.Second,
+		userAgent:  *ua,
+		includeURL: *srcURL,
+		waitFor:    *waitFor,
+	}
+	opts := sitemapOptions{
+		seed:         urlStr,
+		navFile:      *navFile,
+		navDepth:     *navDepth,
+		maxDepth:     *maxDepth,
+		selector:     *selector,
+		all:          *all,
+		workers:      *workers,
+		ratePerSec:   *rate,
+		outDir:       *outDir,
+		extract:      extractCfg,
+		crawlTimeout: time.Duration(*ctTimeout) * time.Second,
+	}
+
+	fetcher, err := NewFetcher(extractCfg)
+	if err != nil {
+		return err
+	}
+	defer fetcher.Close()
+
+	ctx := context.Background()
+	if opts.crawlTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.crawlTimeout)
+		defer cancel()
+	}
+
+	crawler := NewSitemapCrawler(fetcher, opts)
+	report, runErr := crawler.Run(ctx)
+
+	if report != nil {
+		if werr := WriteIndexJSON(*outDir, report); werr != nil {
+			fmt.Fprintf(os.Stderr, "webextract: 写 index.json 失败: %v\n", werr)
+		}
+		if werr := WriteIndexMarkdown(*outDir, report); werr != nil {
+			fmt.Fprintf(os.Stderr, "webextract: 写 index.md 失败: %v\n", werr)
+		}
+		fmt.Fprintf(os.Stderr, "\n抓取完成：%d 个文件（成功 %d，失败 %d，跳过 %d），耗时 %s\n",
+			report.Stats.Total, report.Stats.Success, report.Stats.Failed, report.Stats.Skipped, report.Duration())
+		fmt.Fprintf(os.Stderr, "输出目录：%s\n", *outDir)
+	}
+	return runErr
 }
 
 // boolFlagNames 返回 fs 中所有布尔 flag 的名称集合。布尔 flag 不带单独的值参数，

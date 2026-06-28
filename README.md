@@ -189,6 +189,35 @@ webextract nav https://go.dev --format json -o nav.json
 - **多分区 + ul/li 递归**：容器内若有多个并列的顶层 `<ul>` 分区（文档侧边栏常按 `<h3>` 标题分组），逐一处理并以标题作为分组父节点；对每个 `<li>` 克隆删子列表后取首个 `<a>`（无 `<a>` 时取 `<details><summary>` 等纯文本）作为本层菜单名，再递归子列表；非 ul/ol 结构回退为容器内 `<a>` 的扁平列表。
 - **规范化与过滤**：复用 `NormalizeURL` 去重，默认仅保留同注册域链接（`--all` 关闭），剔除资源后缀与 `javascript:`/`mailto:` 等特殊协议，并清理图标字体连字文本。
 
+## 导航驱动抓取（sitemap-crawl）
+
+「导航驱动爬取」的第二阶段：把导航菜单中**每个带 URL 的节点视为一个独立抓取目标**，仅抓取该 URL 页面本身的正文，**不提取页面中的任何链接**做后续抓取，从源头杜绝「相关阅读 / 热门排行」污染。输出**严格按菜单树形结构**组织目录与文件。
+
+```bash
+# 方式 A：现场提取导航再抓取（一步到位）
+webextract sitemap-crawl https://example.com --output site
+
+# 方式 B：复用第一阶段产出的 nav.json（可人工编辑/裁剪后再抓）
+webextract nav https://example.com --format json -o nav.json
+webextract sitemap-crawl --nav nav.json --output site
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--nav` | — | 读取第一阶段 `nav.json` 作为抓取目标（与 `<URL>` 二选一） |
+| `--nav-depth` | 0 | 仅使用导航的前 N 层菜单作为抓取目标（0=全部） |
+| `--max-depth` | 0 | 导航菜单最大层级（仅现场提取 `<URL>` 时生效） |
+| `--nav-selector` | — | 显式指定导航容器 CSS 选择器（仅现场提取时生效） |
+| `--all` | false | 保留站外导航链接（仅现场提取时生效） |
+| `--workers` | 5 | 并发抓取数量 |
+| `--rate-limit` | 2 | 每秒最大请求数（限流，0=不限） |
+| `--output` | output | Markdown 输出目录 |
+| `--crawl-timeout` | 1800 | 抓取总超时秒数（0=不限） |
+
+单页提取参数（`--selector` / `--timeout` / `--user-agent` / `--include-source-url` / `--wait-for`）同样适用，作用于每个抓取页面。
+
+落盘规则：菜单树每一层对应一层目录；无子菜单且带 URL 的叶子节点写入 `<菜单文本>.md`；既有子菜单又带 URL 的节点写入 `<菜单文本>/index.md` 并把子项落入同名目录；无 URL 的分组标题仅创建目录。同一 URL 出现在多个菜单路径下时仅抓取一次，但在每个路径下均落盘。
+
 ## 工作原理
 
 ```
@@ -217,7 +246,7 @@ Markdown
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 命令行入口、参数解析、`crawl` / `nav` 子命令分发 |
+| `main.go` | 命令行入口、参数解析、`crawl` / `nav` / `sitemap-crawl` 子命令分发 |
 | `fetch.go` | chromedp 无头渲染抓取、Chrome 路径查找、DOM 稳定等待 |
 | `pipeline.go` | 核心流程编排：抓取 → 定位 → 规范化 → 转换 → 清理（`extractFromHTML` 供 crawl 复用） |
 | `extract.go` | 正文区域定位、噪音移除、`data-as` 语义还原、代码块规范化 |
@@ -226,6 +255,7 @@ Markdown
 | `links.go` | 从渲染后原始 DOM 提取站内链接（处理 `<base href>`、过滤资源/特殊协议） |
 | `nav.go` | 从首页 DOM 提取主导航菜单树（容器定位、ul/li 递归、规范化/去重/过滤、树形渲染） |
 | `crawler.go` | BFS 调度 + Worker Pool + 限流 + 去重 + 深度/页数控制 + 熔断 |
+| `sitemap_crawler.go` | 导航驱动抓取：菜单树展开为抓取目标、Worker Pool 逐页抓取、按菜单树结构落盘 |
 | `output.go` | URL→文件路径映射、Markdown 落盘、索引（`index.json` / `index.md`）生成 |
 
 ## 依赖
